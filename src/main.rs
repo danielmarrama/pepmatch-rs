@@ -4,12 +4,15 @@ use regex::Regex;
 use rusqlite;
 
 
-// read in in FASTA file and return a vector of sequences 
+// read in in FASTA file and return a vector of sequences and metadata from header
 fn parse_fasta(filename: &str) -> (Vec<(String, usize)>, Vec<(usize, usize, String, String, String, String, usize, usize)>) {
-    let mut i: usize = 1;
+    let mut i: usize = 1; // protein number
+
     let mut seqs = Vec::new();
     let mut metadata = Vec::new();
     let reader = fasta::Reader::from_file(filename).unwrap();
+
+    // regex to parse the header
     let re = Regex::new(r"(?x)
         (sp|tr)\|
         (?P<protein_id>[^|]+)\|
@@ -18,26 +21,25 @@ fn parse_fasta(filename: &str) -> (Vec<(String, usize)>, Vec<(usize, usize, Stri
         OX=(?P<taxon_id>\d+)(?:\s
         GN=(?P<gene>.+?))?\s
         PE=(?P<pe_level>\d+)\s
-        SV=(?P<gene_priority>\d+)")
+        SV=(?P<sequence_version>\d+)")
         .unwrap();
 
     for result in reader.records() {
         let record = result.unwrap();
         let seq_str = std::str::from_utf8(record.seq()).unwrap();
-        seqs.push((seq_str.to_string(), i));
-
+        seqs.push((seq_str.to_string(), i)); // store the sequence and the protein number
+        
+        // concatenate the id and description to get the full header
         let header = format!("{} {}", record.id(), record.desc().unwrap_or(""));
         if let Some(caps) = re.captures(&header) {
             let protein_id = caps.name("protein_id").unwrap().as_str().to_string();
-            let gene = caps.name("gene").map_or("".to_string(), |m| m.as_str().to_string());
-            let species = caps.name("species").unwrap().as_str().to_string();
+            let protein_name = caps.name("protein_name").map_or("".to_string(), |m| m.as_str().to_string());
             let taxon_id: usize = caps.name("taxon_id").unwrap().as_str().parse().unwrap();
-            let protein_name = caps
-                .name("protein_name")
-                .map_or("".to_string(), |m| m.as_str().to_string());
+            let species = caps.name("species").unwrap().as_str().to_string();
+            let gene = caps.name("gene").map_or("".to_string(), |m| m.as_str().to_string());
             let pe_level: usize = caps.name("pe_level").unwrap().as_str().parse().unwrap();
-            let gene_priority: usize = caps.name("gene_priority").unwrap().as_str().parse().unwrap();
-            metadata.push((i, taxon_id, species, gene, protein_name, protein_id, pe_level, gene_priority));
+            let sequence_version: usize = caps.name("sequence_version").unwrap().as_str().parse().unwrap();
+            metadata.push((i, taxon_id, species, gene, protein_name, protein_id, pe_level, sequence_version));
         }
         i += 1;
     }
@@ -65,8 +67,8 @@ fn connect() -> rusqlite::Connection {
 fn create_kmers_table(conn: &rusqlite::Connection) {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS kmers (
-            kmer            TEXT NOT NULL,
-            idx             INTEGER NOT NULL
+            kmer             TEXT NOT NULL,
+            idx              INTEGER NOT NULL
         )",
         rusqlite::params![],
     )
@@ -77,14 +79,14 @@ fn create_kmers_table(conn: &rusqlite::Connection) {
 fn create_metadata_table(conn: &rusqlite::Connection) {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS metadata (
-            protein_number  INTEGER NOT NULL,
-            taxon_id        INTEGER NOT NULL,
-            species         TEXT NOT NULL,
-            gene            TEXT NOT NULL,
-            protein_id      TEXT NOT NULL,
-            protein_name    TEXT NOT NULL,
-            pe_level        INTEGER NOT NULL,
-            gene_priority   INTEGER NOT NULL
+            protein_number   INTEGER NOT NULL,
+            taxon_id         INTEGER NOT NULL,
+            species          TEXT NOT NULL,
+            gene             TEXT NOT NULL,
+            protein_id       TEXT NOT NULL,
+            protein_name     TEXT NOT NULL,
+            pe_level         INTEGER NOT NULL,
+            sequence_version INTEGER NOT NULL
         )",
         rusqlite::params![],
     )
@@ -116,7 +118,7 @@ fn insert_kmers(conn: &mut rusqlite::Connection, kmers: &[(String, usize)], prot
 fn insert_metadata(conn: &mut rusqlite::Connection, metadata: &[(usize, usize, String, String, String, String, usize, usize)]) {
     let tx = conn.transaction().unwrap();
     let mut stmt = tx
-        .prepare("INSERT INTO metadata (protein_number, taxon_id, species, gene, protein_id, protein_name, pe_level, gene_priority) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
+        .prepare("INSERT INTO metadata (protein_number, taxon_id, species, gene, protein_id, protein_name, pe_level, sequence_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
         .unwrap();
 
     for m in metadata {
