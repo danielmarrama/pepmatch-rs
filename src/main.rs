@@ -14,14 +14,14 @@ fn parse_fasta(filename: &str) -> (Vec<(String, usize)>, Vec<(usize, usize, Stri
 
     // regex to parse the header
     let re = Regex::new(r"(?x)
-        (sp|tr)\|
-        (?P<protein_id>[^|]+)\|
-        (?P<protein_name>.+?)\s
-        OS=(?P<species>.+?)\s
-        OX=(?P<taxon_id>\d+)(?:\s
+        (?:(sp|tr)\|)?
+        (?P<protein_id>[^|]+)
+        (\|(?P<protein_name>.+?))?
+        (?:\sOS=(?P<species>.+?))?\s
+        (?:OX=(?P<taxon_id>\d+))?(?:\s
         GN=(?P<gene>.+?))?\s
-        PE=(?P<pe_level>\d+)\s
-        SV=(?P<sequence_version>\d+)")
+        (?:PE=(?P<pe_level>\d+))?\s
+        (?:SV=(?P<sequence_version>\d+))?")
         .unwrap();
 
     for result in reader.records() {
@@ -51,7 +51,7 @@ fn parse_fasta(filename: &str) -> (Vec<(String, usize)>, Vec<(usize, usize, Stri
 fn split_sequence(seq: &str, k: usize) -> Vec<(String, usize)> {
     let mut kmers = Vec::new();
     let mut i: usize = 0;
-    while i < seq.len() - k + 1 {
+    while i + k <= seq.len() {
         kmers.push((seq[i..i + k].to_string(), i));
         i += 1;
     }
@@ -95,6 +95,9 @@ fn create_metadata_table(conn: &rusqlite::Connection) {
 
 // insert kmers into the table
 fn insert_kmers(conn: &mut rusqlite::Connection, kmers: &[(String, usize)], protein_count: &usize) {
+    // Disable synchronous mode for faster bulk inserts
+    conn.execute("PRAGMA synchronous = OFF", rusqlite::params![]).unwrap();
+
     let tx = conn.transaction().unwrap();
     let mut stmt = tx
         .prepare("INSERT INTO kmers (kmer, idx) VALUES (?1, ?2)")
@@ -107,11 +110,10 @@ fn insert_kmers(conn: &mut rusqlite::Connection, kmers: &[(String, usize)], prot
 
     drop(stmt); // Explicitly drop stmt before committing the transaction
 
-    // create index on kmer column
-    tx.execute("CREATE INDEX IF NOT EXISTS kmer_idx ON kmers (kmer)", rusqlite::params![])
-        .unwrap();
-
     tx.commit().unwrap();
+
+    // Re-enable synchronous mode
+    conn.execute("PRAGMA synchronous = ON", rusqlite::params![]).unwrap();
 }
 
 // insert metadata into the table
@@ -125,14 +127,15 @@ fn insert_metadata(conn: &mut rusqlite::Connection, metadata: &[(usize, usize, S
         stmt.execute(rusqlite::params![m.0, m.1, m.2, m.3, m.4, m.5, m.6, m.7])
             .unwrap();
     }
-
-    drop(stmt);
-
-    // create index on protein_number column
-    tx.execute("CREATE INDEX IF NOT EXISTS protein_number_idx ON metadata (protein_number)", rusqlite::params![])
-        .unwrap();
-
+    drop(stmt); // explicitly drop stmt before committing the transaction
     tx.commit().unwrap();
+}
+
+fn create_indices(conn: &rusqlite::Connection) {
+    conn.execute("CREATE INDEX IF NOT EXISTS kmer_idx ON kmers (kmer)", rusqlite::params![])
+        .unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS protein_number_idx ON metadata (protein_number)", rusqlite::params![])
+        .unwrap();
 }
 
 fn main() {
@@ -168,4 +171,7 @@ fn main() {
         let kmers = split_sequence(&seq.0, k);
         insert_kmers(&mut conn, &kmers, &seq.1);
     }
+
+    // create indices
+    create_indices(&conn);
 }
