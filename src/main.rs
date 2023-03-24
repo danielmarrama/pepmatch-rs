@@ -1,4 +1,5 @@
 use bio::io::fasta;
+use clap::{App, Arg};
 use rusqlite;
 
 
@@ -67,13 +68,43 @@ fn insert_kmers(conn: &mut rusqlite::Connection, kmers: &[(String, usize)], prot
 
 
 fn main() {
-    let filename = "proteome.fasta";
+    let matches = App::new("Preprocess proteome.")
+        .arg(
+            Arg::with_name("proteome")
+                .short('p')
+                .long("proteome")
+                .value_name("FILE")
+                .help("Input FASTA file")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("k")
+                .short('k')
+                .long("k_value")
+                .value_name("K")
+                .help("Value of k for k-mers")
+                .takes_value(true)
+                .required(true),
+        )
+        .get_matches();
+
+    let filename = matches.value_of("proteome").unwrap();
+    let k: usize = matches
+        .value_of("k")
+        .unwrap()
+        .parse()
+        .unwrap_or_else(|_| {
+            eprintln!("Error: k must be an integer");
+            std::process::exit(1);
+        });
+
     let seqs = read_fasta(filename);
     let mut conn = connect();
     create_kmers_table(&conn);
 
     for seq in seqs {
-        let kmers = split_sequence(&seq.0, 3);
+        let kmers = split_sequence(&seq.0, k);
         insert_kmers(&mut conn, &kmers, &seq.1);
     }
 }
