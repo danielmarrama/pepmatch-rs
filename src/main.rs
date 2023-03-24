@@ -1,9 +1,25 @@
+use bio::io::fasta;
 use rusqlite;
+
+
+// read in in FASTA file and return a vector of sequences 
+fn read_fasta(filename: &str) -> Vec<(String, usize)> {
+    let mut i: usize = 1;
+    let mut seqs = Vec::new();
+    let reader = fasta::Reader::from_file(filename).unwrap();
+    for result in reader.records() {
+        let record = result.unwrap();
+        let seq_str = std::str::from_utf8(record.seq()).unwrap();
+        seqs.push((seq_str.to_string(), i));
+        i += 1;
+    }
+    seqs
+}
 
 // split the peptide into k-mers with a window size of 1 and store also the index of that k-mer
 fn split_sequence(seq: &str, k: usize) -> Vec<(String, usize)> {
     let mut kmers = Vec::new();
-    let mut i = 0;
+    let mut i: usize = 0;
     while i < seq.len() - k + 1 {
         kmers.push((seq[i..i + k].to_string(), i));
         i += 1;
@@ -11,14 +27,13 @@ fn split_sequence(seq: &str, k: usize) -> Vec<(String, usize)> {
     kmers
 }
 
-// connect to sqlite db, call it proteome.db
+// connect to SQLite DB, call it proteome.db
 fn connect() -> rusqlite::Connection {
-    let conn = rusqlite::Connection::open("proteome.db").unwrap();
-    conn
+    rusqlite::Connection::open("proteome.db").unwrap()
 }
 
-// create a kmers --> index table in the db
-fn create_table(conn: &rusqlite::Connection) {
+// create a kmers --> index table in the DB
+fn create_kmers_table(conn: &rusqlite::Connection) {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS kmers (
                   kmer            TEXT NOT NULL,
@@ -30,22 +45,35 @@ fn create_table(conn: &rusqlite::Connection) {
 }
 
 // insert kmers into the table
-fn insert_kmers(conn: &rusqlite::Connection, kmers: Vec<(String, usize)>) {
-    let mut stmt = conn
+fn insert_kmers(conn: &mut rusqlite::Connection, kmers: &[(String, usize)], protein_count: &usize) {
+    let tx = conn.transaction().unwrap();
+    let mut stmt = tx
         .prepare("INSERT INTO kmers (kmer, idx) VALUES (?1, ?2)")
         .unwrap();
+
     for kmer in kmers {
-        stmt.execute(rusqlite::params![kmer.0, kmer.1])
+        stmt.execute(rusqlite::params![kmer.0, (protein_count * 1000000) + kmer.1])
             .unwrap();
     }
+
+    drop(stmt); // Explicitly drop stmt before committing the transaction
+
+    // create index on kmer column
+    tx.execute("CREATE INDEX IF NOT EXISTS kmer_idx ON kmers (kmer)", rusqlite::params![])
+        .unwrap();
+
+    tx.commit().unwrap();
 }
+
 
 fn main() {
-    let protein = "MLPGLALLLLAAWTARALEVPTDGNAGLLAEPQIAMFCGRLNMHMNVQNGKWDSDPSGTK";
-    let kmers = split_sequence(protein, 3);
-    println!("{:?}", kmers);
-    let conn = connect();
-    create_table(&conn);
-    insert_kmers(&conn, kmers);
-}
+    let filename = "proteome.fasta";
+    let seqs = read_fasta(filename);
+    let mut conn = connect();
+    create_kmers_table(&conn);
 
+    for seq in seqs {
+        let kmers = split_sequence(&seq.0, 3);
+        insert_kmers(&mut conn, &kmers, &seq.1);
+    }
+}
