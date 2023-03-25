@@ -15,11 +15,12 @@ fn parse_fasta(filename: &str) -> (Vec<(String, usize)>, Vec<(usize, usize, Stri
     // regex to parse the header
     let re = Regex::new(r"(?x)
         (?:(sp|tr)\|)?
-        (?P<protein_id>[^|]+)
-        (\|(?P<protein_name>.+?))?
-        (?:\sOS=(?P<species>.+?))?\s
-        (?:OX=(?P<taxon_id>\d+))?(?:\s
-        GN=(?P<gene>.+?))?\s
+        \|(?P<protein_id>[^|]+)\|
+        (\|[^|\s]+)?
+        (?:\s(?P<protein_name>.+?))?\s
+        (?:OS=(?P<species>.+?))?\s
+        (?:OX=(?P<taxon_id>\d+))?\s
+        (?:GN=(?P<gene>.+?))?\s
         (?:PE=(?P<pe_level>\d+))?\s
         (?:SV=(?P<sequence_version>\d+))?")
         .unwrap();
@@ -31,15 +32,17 @@ fn parse_fasta(filename: &str) -> (Vec<(String, usize)>, Vec<(usize, usize, Stri
         
         // concatenate the id and description to get the full header
         let header = format!("{} {}", record.id(), record.desc().unwrap_or(""));
+
+        // parse the header
         if let Some(caps) = re.captures(&header) {
             let protein_id = caps.name("protein_id").unwrap().as_str().to_string();
             let protein_name = caps.name("protein_name").map_or("".to_string(), |m| m.as_str().to_string());
-            let taxon_id: usize = caps.name("taxon_id").unwrap().as_str().parse().unwrap();
             let species = caps.name("species").unwrap().as_str().to_string();
+            let taxon_id: usize = caps.name("taxon_id").unwrap().as_str().parse().unwrap();
             let gene = caps.name("gene").map_or("".to_string(), |m| m.as_str().to_string());
             let pe_level: usize = caps.name("pe_level").unwrap().as_str().parse().unwrap();
             let sequence_version: usize = caps.name("sequence_version").unwrap().as_str().parse().unwrap();
-            metadata.push((i, taxon_id, species, gene, protein_name, protein_id, pe_level, sequence_version));
+            metadata.push((i, taxon_id, species, gene, protein_id, protein_name, pe_level, sequence_version));
         }
         i += 1;
     }
@@ -123,19 +126,24 @@ fn insert_metadata(conn: &mut rusqlite::Connection, metadata: &[(usize, usize, S
         .prepare("INSERT INTO metadata (protein_number, taxon_id, species, gene, protein_id, protein_name, pe_level, sequence_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
         .unwrap();
 
-    for m in metadata {
-        stmt.execute(rusqlite::params![m.0, m.1, m.2, m.3, m.4, m.5, m.6, m.7])
+    for data in metadata {
+        stmt.execute(rusqlite::params![data.0, data.1, data.2, data.3, data.4, data.5, data.6, data.7])
             .unwrap();
     }
     drop(stmt); // explicitly drop stmt before committing the transaction
     tx.commit().unwrap();
 }
 
-fn create_indices(conn: &rusqlite::Connection) {
-    conn.execute("CREATE INDEX IF NOT EXISTS kmer_idx ON kmers (kmer)", rusqlite::params![])
+// create indices on the kmers and metadata tables
+fn create_indices(conn: &mut rusqlite::Connection) {
+    let tx = conn.transaction().unwrap();
+
+    tx.execute("CREATE INDEX IF NOT EXISTS kmer_idx ON kmers (kmer)", rusqlite::params![])
         .unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS protein_number_idx ON metadata (protein_number)", rusqlite::params![])
+    tx.execute("CREATE INDEX IF NOT EXISTS protein_number_idx ON metadata (protein_number)", rusqlite::params![])
         .unwrap();
+
+    tx.commit().unwrap();
 }
 
 fn main() {
@@ -173,5 +181,5 @@ fn main() {
     }
 
     // create indices
-    create_indices(&conn);
+    create_indices(&mut conn);
 }
