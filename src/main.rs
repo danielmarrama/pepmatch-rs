@@ -4,46 +4,62 @@ use regex::Regex;
 use rusqlite;
 
 
-// read in in FASTA file and return a vector of sequences and metadata from header
-fn parse_fasta(filename: &str) -> (Vec<(String, usize)>, Vec<(usize, usize, String, String, String, String, usize, usize)>) {
+// read in proteome FASTA file and return a vector of sequences and metadata from header
+fn get_data_from_proteome(filename: &str) -> (Vec<(String, usize)>, Vec<(String, String, String, String, String, String, usize, usize)>) {
     let mut i: usize = 1; // protein number
 
     let mut seqs = Vec::new();
     let mut metadata = Vec::new();
     let reader = fasta::Reader::from_file(filename).unwrap();
 
-    // regex to parse the header
-    let re = Regex::new(r"(?x)
-        (?:(sp|tr)\|)?
-        \|(?P<protein_id>[^|]+)\|
-        (\|[^|\s]+)?
-        (?:\s(?P<protein_name>.+?))?\s
-        (?:OS=(?P<species>.+?))?\s
-        (?:OX=(?P<taxon_id>\d+))?\s
-        (?:GN=(?P<gene>.+?))?\s
-        (?:PE=(?P<pe_level>\d+))?\s
-        (?:SV=(?P<sequence_version>\d+))?")
-        .unwrap();
+    // regexes to parse the header
+    let regexes = [
+        ("protein_id", Regex::new(r"\|([^|]*)\|").unwrap()),           // between | and |
+        ("protein_name", Regex::new(r"\s(.+?)OS").unwrap()),           // between first space and OS=
+        ("species", Regex::new(r"OS=(.+?)OX").unwrap()),               // between OS= and OX (species can have spaces)
+        ("taxon_id", Regex::new(r"OX=(\d+?)\s").unwrap()),             // between OX= and space
+        ("gene", Regex::new(r"GN=(.+?)\s").unwrap()),                  // between GN= and space
+        ("pe_level", Regex::new(r"PE=(\d+?)\s").unwrap()),             // between PE= and space
+        ("sequence_version", Regex::new(r"SV=(\d+?)(\s|$)").unwrap()), // between SV= and space or end of line
+    ];
 
     for result in reader.records() {
         let record = result.unwrap();
         let seq_str = std::str::from_utf8(record.seq()).unwrap();
-        seqs.push((seq_str.to_string(), i)); // store the sequence and the protein number
+        seqs.push((seq_str.to_string(), i)); // store the sequence
         
         // concatenate the id and description to get the full header
         let header = format!("{} {}", record.id(), record.desc().unwrap_or(""));
 
-        // parse the header
-        if let Some(caps) = re.captures(&header) {
-            let protein_id = caps.name("protein_id").unwrap().as_str().to_string();
-            let protein_name = caps.name("protein_name").map_or("".to_string(), |m| m.as_str().to_string());
-            let species = caps.name("species").unwrap().as_str().to_string();
-            let taxon_id: usize = caps.name("taxon_id").unwrap().as_str().parse().unwrap();
-            let gene = caps.name("gene").map_or("".to_string(), |m| m.as_str().to_string());
-            let pe_level: usize = caps.name("pe_level").unwrap().as_str().parse().unwrap();
-            let sequence_version: usize = caps.name("sequence_version").unwrap().as_str().parse().unwrap();
-            metadata.push((i, taxon_id, species, gene, protein_id, protein_name, pe_level, sequence_version));
+        // loop through the regexes and parse the header
+        let mut metadata_entry: Vec<String> = vec![i.to_string()];
+        for (key, regex) in &regexes {
+            let match_option = regex.captures(&header);
+            
+            if let Some(capture) = match_option {
+                metadata_entry.push(capture.get(1).unwrap().as_str().to_string());
+            } else {
+                if key == &"protein_id" {
+                    metadata_entry.push(record.id().to_string());
+                } else if ["pe_level", "sequence_version"].contains(key) {
+                    metadata_entry.push("0".to_string());
+                } else {
+                    metadata_entry.push("".to_string());
+                }
+            }
         }
+
+        let metadata_tuple = (
+            metadata_entry[0].clone(),
+            metadata_entry[1].clone(),
+            metadata_entry[2].clone(),
+            metadata_entry[3].clone(),
+            metadata_entry[4].clone(),
+            metadata_entry[5].clone(),
+            metadata_entry[6].parse::<usize>().unwrap(),
+            metadata_entry[7].parse::<usize>().unwrap()
+        );
+        metadata.push(metadata_tuple);
         i += 1;
     }
 
@@ -83,11 +99,11 @@ fn create_metadata_table(conn: &rusqlite::Connection) {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS metadata (
             protein_number   INTEGER NOT NULL,
-            taxon_id         INTEGER NOT NULL,
-            species          TEXT NOT NULL,
-            gene             TEXT NOT NULL,
-            protein_id       TEXT NOT NULL,
+            protein_id       INTEGER NOT NULL,
             protein_name     TEXT NOT NULL,
+            species          TEXT NOT NULL,
+            taxon_id         TEXT NOT NULL,
+            gene             TEXT NOT NULL,
             pe_level         INTEGER NOT NULL,
             sequence_version INTEGER NOT NULL
         )",
@@ -120,10 +136,10 @@ fn insert_kmers(conn: &mut rusqlite::Connection, kmers: &[(String, usize)], prot
 }
 
 // insert metadata into the table
-fn insert_metadata(conn: &mut rusqlite::Connection, metadata: &[(usize, usize, String, String, String, String, usize, usize)]) {
+fn insert_metadata(conn: &mut rusqlite::Connection, metadata: &[(String, String, String, String, String, String, usize, usize)]) {
     let tx = conn.transaction().unwrap();
     let mut stmt = tx
-        .prepare("INSERT INTO metadata (protein_number, taxon_id, species, gene, protein_id, protein_name, pe_level, sequence_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
+        .prepare("INSERT INTO metadata (protein_number, protein_id, protein_name, species, taxon_id, gene, pe_level, sequence_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
         .unwrap();
 
     for data in metadata {
@@ -166,7 +182,7 @@ fn main() {
         });
     
     // parse proteome file and connect to DB
-    let (seqs, metadata) = parse_fasta(filename);
+    let (seqs, metadata) = get_data_from_proteome(filename);
     let mut conn = connect();
 
     // create metadata table and insert metadata
